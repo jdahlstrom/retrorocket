@@ -1,0 +1,16 @@
+[package]
+name = "retrorocket"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+re = { package = "retrofire", path = "../retrofire" }
+re-front = { package = "retrofire-front", path = "../retrofire/front", features = ["minifb"] }
+minifb = { version = "0.27.0" }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
