@@ -1,20 +1,49 @@
-use minifb::{Key, Scale, WindowOptions};
+use minifb::{Key, KeyRepeat, Scale, WindowOptions};
 use std::ops::ControlFlow::Continue;
 use std::time::Instant;
 
 use re::prelude::*;
 
 use re::core::util::Dims;
-use re::geom::solids::Build;
-use re::prelude::color::gray;
-use re::prelude::mat::ProjMat3;
+use re::geom::solids::{Build, Icosphere};
+use re::prelude::clip::ClipVec;
 use re_front::minifb::Window;
+use re_front::Frame;
 
 use entity::*;
 
 mod entity;
 
 const DIMS: Dims = (640, 360);
+
+fn vertex_shader<P, A, Pt: Apply<P, Output = ClipVec>, At: Apply<A>>(
+    v: Vertex<P, A>,
+    (pos_tf, attr_tf): (&Pt, &At),
+) -> Vertex<ClipVec, At::Output> {
+    vertex(pos_tf.apply(&v.pos), attr_tf.apply(&v.attrib))
+}
+
+const MACHINE_GUN: Gun = Gun {
+    cooldown: 0.05,
+    muzzle_vel: 400.0,
+    spread: polar(0.1, degs(1.5)),
+    shots: 1,
+    bullets: vec![],
+};
+const SHOTGUN: Gun = Gun {
+    cooldown: 0.5,
+    muzzle_vel: 300.0,
+    spread: polar(0.2, degs(5.0)),
+    shots: 20,
+    bullets: vec![],
+};
+const CLAYMORE: Gun = Gun {
+    cooldown: 1.0,
+    muzzle_vel: 300.0,
+    spread: polar(0.0, degs(360.0)),
+    shots: 100,
+    bullets: vec![],
+};
 
 fn main() {
     let mut win = Window::builder()
@@ -28,78 +57,66 @@ fn main() {
         .build()
         .unwrap();
 
-    let mut player = Ship::default();
-    player.dir = vec2(0.0, -1.0);
-    player.pos = pt2(DIMS.0 as f32 / 2.0, DIMS.1 as f32 / 2.0);
+    let player = Ship {
+        pos: pt2(DIMS.0 as f32 / 2.0, DIMS.1 as f32 / 2.0),
+        dir: vec2(0.0, -1.0),
+        guns: vec![MACHINE_GUN.clone(), SHOTGUN.clone(), CLAYMORE.clone()],
+        ..Ship::default()
+    };
+    let rock = Rock {
+        pos: pt2(200.0, 100.0),
+        vel: vec2(20.0, 7.0),
+        mesh: Icosphere(1.0, 1).build(),
+        ..Rock::default()
+    };
+    let mut level = Level { player, rock };
 
-    let mut level = Level { player };
-
-    let mut cooldown = 0.0;
+    let mut paused = false;
     let start = Instant::now();
-    win.run(|frame| {
-        let w = &frame.win.imp;
-        let t = frame.t.as_secs_f32();
-        let dt = frame.dt.as_secs_f32();
+    win.run(
+        |Frame {
+             t, dt, buf, win, ..
+         }| {
+            let w = &win.imp;
+            let _t = t.as_secs_f32();
+            let dt = dt.as_secs_f32();
 
-        let plr = &mut level.player;
+            let plr = &mut level.player;
 
-        plr.acc = Vec2::zero();
-        plr.rot = Angle::zero();
-        if w.is_key_down(Key::W) {
-            plr.acc += 100.0 * plr.dir;
-        }
-        if w.is_key_down(Key::A) {
-            plr.rot = turns(1.0);
-        }
-        if w.is_key_down(Key::D) {
-            plr.rot = turns(-1.0);
-        }
+            plr.thrust = false;
+            plr.acc = Vec2::zero();
+            let mut target_rot = Angle::zero();
+            if w.is_key_down(Key::Up) {
+                plr.thrust();
+            }
+            if w.is_key_down(Key::Left) {
+                target_rot = Ship::ROT_RATE;
+            }
+            if w.is_key_down(Key::Right) {
+                target_rot = -Ship::ROT_RATE;
+            }
+            if w.is_key_down(Key::Space) {
+                plr.fire();
+            }
+            if w.is_key_pressed(Key::P, KeyRepeat::No) {
+                paused = !paused;
+            }
+            if w.is_key_pressed(Key::LeftSuper, KeyRepeat::No) {
+                plr.guns.rotate_left(1);
+            }
+            if !paused {
+                plr.rotate(target_rot, dt);
+                plr.acc += vec2(0.0, 20.0); // Gravity
 
-        if w.is_key_down(Key::Space) {
-            plr.fire();
-        }
-        cooldown -= dt;
-        plr.acc += vec2(0.0, 20.0); // Gravity
+                level.update(dt);
+            }
 
-        level.update(dt);
+            // RENDER
 
-        // RENDER
-
-        let buf = &mut frame.buf.color_buf.buf;
-
-        level.render(buf);
-
-        let rock = re::geom::solids::Dodecahedron.build();
-
-        let rot = rotate_y(turns(0.1 * t)).then(&rotate_z(turns(0.05 * t)));
-        let mvp = scale(splat(50.0))
-            .then(&rot)
-            .then(&translate3(
-                20.0 * t % DIMS.0 as f32,
-                5.0 * t % DIMS.1 as f32,
-                0.0,
-            ))
-            .to()
-            .then(&orthographic(
-                pt3(0.0, 0.0, -1e3),
-                pt3(DIMS.0 as f32, DIMS.1 as f32, 1e3),
-            ));
-
-        Batch::new()
-            .mesh(&rock)
-            .shader(shader::new(
-                |v: Vertex3<Normal3>, (mvp, n): (&ProjMat3<Model>, &Mat4)| {
-                    vertex(mvp.apply(&v.pos), n.apply(&v.attrib).normalize())
-                },
-                |f: Frag<Normal3>| gray(f.var.x().abs()).to_color4(),
-            ))
-            .uniform((&mvp, &rot))
-            .viewport(viewport(pt2(0, 0)..pt2(DIMS.0, DIMS.1)))
-            .target(&mut frame.buf)
-            .render();
-
-        Continue(())
-    });
+            level.render(buf);
+            Continue(())
+        },
+    );
     let stats = win.ctx.stats.borrow();
     let elapsed = start.elapsed();
     eprintln!(
